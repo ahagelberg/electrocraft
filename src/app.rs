@@ -8,6 +8,7 @@ use crate::document::{
     Connection, DiagramType, Orientation, PinRef, PlacedSymbol, Project, SheetSize, SymbolCategory,
     SymbolGlyph,
 };
+use crate::pdf_export;
 use crate::project_io;
 
 const LEFT_PANEL_WIDTH: f32 = 224.0;
@@ -131,6 +132,10 @@ impl ElectrocraftApp {
                 }
                 if ui.button("Save as...").clicked() {
                     self.save_project(true);
+                    ui.close();
+                }
+                if ui.button("Export PDF...").clicked() {
+                    self.export_pdf();
                     ui.close();
                 }
             });
@@ -401,6 +406,21 @@ impl ElectrocraftApp {
                 connection.from.symbol_id != selected_id && connection.to.symbol_id != selected_id
             });
             self.selected_symbol = None;
+        }
+    }
+
+    fn export_pdf(&mut self) {
+        let filename = pdf_export::suggested_filename(&self.project.title);
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name(filename)
+            .save_file()
+        else {
+            return;
+        };
+        match pdf_export::write_project(&self.project, &path) {
+            Ok(()) => self.status = format!("PDF exported to {}", path.display()),
+            Err(error) => self.status = format!("PDF export failed: {error}"),
         }
     }
 

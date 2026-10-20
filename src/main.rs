@@ -1,6 +1,7 @@
 mod app;
 mod canvas;
 mod document;
+mod pdf_export;
 mod project_io;
 
 fn main() -> eframe::Result {
