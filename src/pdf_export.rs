@@ -29,6 +29,7 @@ const TITLE_FONT_SIZE_PT: f32 = 8.0;
 const BODY_FONT_SIZE_PT: f32 = 7.0;
 const SMALL_FONT_SIZE_PT: f32 = 6.0;
 const INVALID_FILENAME_CHARACTERS: &str = "<>:\"/\\|?*";
+const WIN_1252_SPECIAL_CHARACTERS: &str = "\u{20ac}\u{201a}\u{0192}\u{201e}\u{2026}\u{2020}\u{2021}\u{02c6}\u{2030}\u{0160}\u{2039}\u{0152}\u{017d}\u{2018}\u{2019}\u{201c}\u{201d}\u{2022}\u{2013}\u{2014}\u{02dc}\u{2122}\u{0161}\u{203a}\u{0153}\u{017e}\u{0178}";
 
 pub fn suggested_filename(title: &str) -> String {
     let stem: String = title
@@ -424,7 +425,7 @@ fn draw_path(ops: &mut Vec<Op>, points: &[(f32, f32)], height: f32, is_closed: b
             points: points
                 .iter()
                 .map(|(x, y)| LinePoint {
-                    p: Point::new(Mm(*x), Mm(height - y)),
+                    p: page_point(*x, *y, height),
                     bezier: false,
                 })
                 .collect(),
@@ -445,6 +446,7 @@ fn add_text(
     if text.is_empty() {
         return;
     }
+    let text = normalize_builtin_font_text(text);
     ops.extend([
         Op::StartTextSection,
         Op::SetFontSizeBuiltinFont {
@@ -452,35 +454,149 @@ fn add_text(
             font,
         },
         Op::SetTextCursor {
-            pos: Point::new(Mm(x), Mm(height - y)),
+            pos: page_point(x, y, height),
         },
         Op::WriteTextBuiltinFont {
-            items: vec![TextItem::Text(text.to_owned())],
+            items: vec![TextItem::Text(text)],
             font,
         },
         Op::EndTextSection,
     ]);
 }
 
+fn page_point(x: f32, y: f32, height: f32) -> Point {
+    Point::new(Mm(x), Mm(height - y))
+}
+
+fn normalize_builtin_font_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_ascii_graphic()
+                || character == ' '
+                || ('\u{00a0}'..='\u{00ff}').contains(&character)
+                || WIN_1252_SPECIAL_CHARACTERS.contains(character)
+            {
+                character
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Orientation, Page, SheetSize};
+    use crate::document::{
+        Annotation, Connection, Orientation, Page, PinRef, PlacedSymbol, PointMm, SheetSize,
+    };
+    use uuid::Uuid;
+
+    const PAGE_DIMENSION_TOLERANCE_PT: f32 = 0.01;
 
     #[test]
-    fn exports_each_project_page_at_its_sheet_size() {
+    fn exports_all_sheet_sizes_and_orientations_with_diagram_content() {
+        let configurations = [
+            (SheetSize::A4, Orientation::Portrait),
+            (SheetSize::A4, Orientation::Landscape),
+            (SheetSize::A3, Orientation::Portrait),
+            (SheetSize::A3, Orientation::Landscape),
+        ];
         let mut project = Project::new();
-        let mut second_page = Page::new("Page 2".to_owned());
-        second_page.sheet_size = SheetSize::A3;
-        second_page.orientation = Orientation::Portrait;
-        project.pages.push(second_page);
+        project.pages = configurations
+            .into_iter()
+            .map(|(sheet_size, orientation)| {
+                let mut page = Page::new("Test page".to_owned());
+                page.sheet_size = sheet_size;
+                page.orientation = orientation;
+                page
+            })
+            .collect();
+        let definition = project
+            .symbol_definitions
+            .first()
+            .expect("starter symbol should exist");
+        let first_pin = definition.pins.first().expect("starter pin should exist");
+        let second_pin = definition
+            .pins
+            .last()
+            .expect("second starter pin should exist");
+        let first_symbol_id = Uuid::new_v4();
+        let second_symbol_id = Uuid::new_v4();
+        let first_symbol = PlacedSymbol {
+            id: first_symbol_id,
+            definition_id: definition.id,
+            designation: "Q1".to_owned(),
+            label: "Breaker".to_owned(),
+            position: PointMm { x: 40.0, y: 40.0 },
+            rotation_quarters: 0,
+        };
+        let second_symbol = PlacedSymbol {
+            id: second_symbol_id,
+            definition_id: definition.id,
+            designation: "Q2".to_owned(),
+            label: "Breaker".to_owned(),
+            position: PointMm { x: 80.0, y: 40.0 },
+            rotation_quarters: 0,
+        };
+        let page = project
+            .pages
+            .first_mut()
+            .expect("project page should exist");
+        page.title_block.project_title = "Test project".to_owned();
+        page.title_block.prepared_by = "Test engineer".to_owned();
+        page.symbols.extend([first_symbol, second_symbol]);
+        page.connections.push(Connection {
+            id: Uuid::new_v4(),
+            from: PinRef {
+                symbol_id: first_symbol_id,
+                pin_id: first_pin.id.clone(),
+            },
+            to: PinRef {
+                symbol_id: second_symbol_id,
+                pin_id: second_pin.id.clone(),
+            },
+            vertices: vec![PointMm { x: 60.0, y: 40.0 }],
+        });
+        page.annotations.push(Annotation {
+            id: Uuid::new_v4(),
+            text: "Export test note".to_owned(),
+            position: PointMm { x: 30.0, y: 70.0 },
+        });
 
         let document = build_document(&project).expect("PDF document should be created");
         let mut warnings = Vec::new();
         let bytes = document.save(&PdfSaveOptions::default(), &mut warnings);
 
-        assert_eq!(document.pages.len(), 2);
+        assert_eq!(document.pages.len(), configurations.len());
         assert!(bytes.starts_with(b"%PDF-"));
+        for (pdf_page, source_page) in document.pages.iter().zip(&project.pages) {
+            let (width_mm, height_mm) = source_page.dimensions_mm();
+            assert!(
+                (pdf_page.media_box.width.0 - width_mm * PT_PER_MM).abs()
+                    < PAGE_DIMENSION_TOLERANCE_PT
+            );
+            assert!(
+                (pdf_page.media_box.height.0 - height_mm * PT_PER_MM).abs()
+                    < PAGE_DIMENSION_TOLERANCE_PT
+            );
+        }
+        let first_page = document.pages.first().expect("PDF page should exist");
+        assert!(
+            first_page
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::DrawLine { .. }))
+        );
+        assert!(has_builtin_text(first_page, "Test project"));
+        assert!(has_builtin_text(first_page, "Test engineer"));
+        assert!(has_builtin_text(first_page, "Export test note"));
+        let annotation_point = page_point(30.0, 70.0, crate::document::A4_HEIGHT_MM);
+        assert!((annotation_point.x.0 - 30.0 * PT_PER_MM).abs() < PAGE_DIMENSION_TOLERANCE_PT);
+        assert!(
+            (annotation_point.y.0 - (crate::document::A4_HEIGHT_MM - 70.0) * PT_PER_MM).abs()
+                < PAGE_DIMENSION_TOLERANCE_PT
+        );
     }
 
     #[test]
@@ -490,5 +606,32 @@ mod tests {
             "Power_ panel _ north.pdf"
         );
         assert_eq!(suggested_filename("..."), "electrocraft.pdf");
+    }
+
+    #[test]
+    fn builtin_font_text_replaces_unsupported_characters() {
+        assert_eq!(
+            normalize_builtin_font_text("Caf\u{00e9} \u{20ac} \u{1f600}\u{6771}\n"),
+            "Caf\u{00e9} \u{20ac} ???"
+        );
+    }
+
+    #[test]
+    fn write_project_propagates_file_errors() {
+        let path = std::env::temp_dir()
+            .join(Uuid::new_v4().to_string())
+            .join("export.pdf");
+        let error = write_project(&Project::new(), &path)
+            .expect_err("writing into a missing directory should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    fn has_builtin_text(page: &PdfPage, expected: &str) -> bool {
+        page.ops.iter().any(|op| matches!(
+            op,
+            Op::WriteTextBuiltinFont { items, .. }
+                if items.iter().any(|item| matches!(item, TextItem::Text(text) if text == expected))
+        ))
     }
 }
