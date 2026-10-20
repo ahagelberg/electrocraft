@@ -1,0 +1,12 @@
+[package]
+name = "electrocraft"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "=0.35.0", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+rfd = "=0.17.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
